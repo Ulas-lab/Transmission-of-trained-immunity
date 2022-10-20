@@ -1,0 +1,625 @@
+---
+title: "2.1 Re-analysis of Transgen - cMOPs"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  html_document: 
+    toc: true
+    toc_float: true
+---
+
+# 1. R requirements
+
+## 1.1 Install and load packages
+
+First, we install all necessary CRAN and Bioconductor packages and load them into the R session.
+
+### Install CRAN
+```{r}
+# CRAN packages
+list.of.packages <- c("apeglm", 
+                      "factoextra",
+                      "ggbeeswarm",
+                      "ggplot2",
+                      "ggrepel",
+                      "gplots",
+                      "hexbin",
+                      "Hmisc",
+                      "openxlsx",
+                      "patchwork",
+                      "plotly",
+                      "reshape2",
+                      "scales",
+                      "tidyr",
+                      "VennDiagram")
+
+new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
+if(length(new.packages)>0) install.packages(new.packages)
+```
+
+
+### Install BioConductor
+
+```{r}
+# BioconductoR packages
+list.of.bioc.packages <- c("biomaRt",
+                           "clusterProfiler",
+                           "ComplexHeatmap",
+                           "DESeq2",
+                           "DOSE",
+                           "genefilter",
+                           "ggpubr",
+                           "GSEABase",
+                           "GSVA",
+                           "IHW",
+                           "limma",
+                           "org.Mm.eg.db",
+                           "org.Hs.eg.db", 
+                           "pheatmap",
+                           "RColorBrewer",
+                           "rhdf5",
+                           "sva",
+                           "tximport",
+                           "vsn")
+
+new.packages.bioc <- list.of.bioc.packages[!(list.of.bioc.packages %in% installed.packages()[,"Package"])]
+if(length(new.packages.bioc)>0) if (!requireNamespace("BiocManager")) install.packages("BiocManager")
+BiocManager::install(new.packages.bioc, update = FALSE)
+```
+
+
+### Load Packages
+
+```{r load packages, results='hide',message=FALSE,warning=FALSE}
+lapply(c(list.of.packages,list.of.bioc.packages), require, character.only = TRUE)
+```
+
+```{r}
+rm(list.of.packages,list.of.bioc.packages, new.packages, new.packages.bioc)
+```
+
+
+## 1.2 Load functions
+
+We define functions used for analysis and visualization of our data, which are collected in the DESey_functions.Rmd file. 
+Most of our plots are based on ggplot2, so you can add different themes our change scales, etc. 
+Example:
+DEcompare$KEGGplot+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+  
+```{r}
+source(file = "DESeq_functions_V2.1.R")
+```
+
+
+# 2. Project information
+
+```{r}
+organism = "mouse" # choose "mouse" or "human"
+```
+
+```{r}
+aligner = "kallisto" #choose "STAR" or "kallisto"
+```
+
+
+# 3. Data Import
+
+## 3.0 Load published DEGs
+```{r}
+DEGs_publication <- read.csv(file = "DEGs_publication.csv", sep = ";")
+```
+
+
+## 3.1 Load gene annotation
+
+```{r gene annotation import}
+# Specify the filename of your gene annotation file here: 
+# annotation_filename <- "~/data/annotation/mouse/mm10/ID2SYMBOL_gencode_vM16_transcript.txt"
+# 
+# tx_annotation <- read.delim(file = annotation_filename,
+#                             header = F , 
+#                             stringsAsFactors = F,
+#                             col.names = c("GENEID", "TXNAME", "SYMBOL", "GENETYPE"))
+```
+
+
+## 3.3 Load sample table
+
+```{r sample table import}
+sample_table <- read.csv2("sample_table.csv", sep=",", row.names = 1)
+
+colnames(sample_table) <- c("sample_name", "ID", "total_reads.old", "pseudoaligned_reads.old", "not_pseudoaligned_reads.old",
+                            "percent_aligned.old", "Cells", "Index", "Celltype", "Infection", "condition", "Mouse")     
+rownames(sample_table) <- sample_table$sample_name
+
+# subset on cMOP samples
+sample_table <- sample_table[sample_table$Celltype == "cMOP", ]
+
+sample_table$condition <- factor(sample_table$condition,
+                                 levels = c("cMOP_control", "cMOP_infected"))
+
+# define factor for order of samples in plotting 
+plot_order <- "condition"
+```
+
+
+### Colour scheme customization
+
+```{r}
+col_condition <- c("#FD8D3C", "#9E9AC8")
+
+col_infection <- c("#FD8D3C", "#9E9AC8")
+names(col_infection) <- c("infected", "control")
+
+col_sample <- c(brewer.pal(name = "Oranges", n = 9)[3:7], brewer.pal(name = "Purples", n = 9)[3:7])
+
+col_celltype <- c("darkgrey", "darkgreen", "darkblue")
+names(col_celltype) <- unique(sample_table$Celltype)
+
+col_condition <- RColorBrewer::brewer.pal(6, "Paired")[3:4]
+names(col_condition) <- unique(sample_table$condition)
+
+ann_colors <- list(Infection = col_infection,
+                   Celltype = col_celltype,
+                   condition = col_condition)
+```
+
+
+
+# 4. Import of count files
+
+```{r kallisto import}
+# Import samples (.h5abundance) and perform the distribution of transcripts to genes
+# txi_kallisto <- tximport(files,
+#                          type="kallisto",
+#                          tx2gene=tx_annotation[,2:1])
+```
+
+
+# 5. Building the DESeqDataSet
+
+## 5.1 Generate DESeq object
+
+```{r DESeqDatasetFromTXimport}
+# dds_txi <- DESeqDataSetFromTximport(txi = txi_kallisto,
+#                                     colData = sample_table,
+#                                     design = ~condition)
+# saveRDS(dds_txi, "dds_txi_cMOPs.rds")
+dds_txi <- readRDS("dds_txi_cMOPs.rds")
+```
+
+## 5.2 Pre-filtering
+
+```{r}
+# Different cutoffs applied during our attempt to study the influence of more stringent filtering on the outcome on DE analysis:
+
+# # Exclude genes with TPM < 2 in >= 5 samples
+# tmp <- txi_kallisto$abundance%>% as.data.frame()
+# genes_to_keep <- rowSums(tmp >= 2) >= 5
+# table(genes_to_keep)
+# 
+# # Exclude genes with less than 10 reads total
+# genes_to_keep <- rowSums(counts(dds_txi)) >= 10
+# table(genes_to_keep)
+# 
+# # Exclude genes with less than 10 reads in 5 or more samples
+# genes_to_keep <- rowSums(counts(dds_txi)>= 10) >=5
+# table(genes_to_keep)
+```
+
+```{r pre-filtering}
+# Selected cutoff
+genes_to_keep <- rowSums(counts(dds_txi)>= 10) >=5
+table(genes_to_keep)
+```
+
+
+```{r pre-filtering}
+dds <- dds_txi[genes_to_keep,]
+dds
+```
+
+## 5.3 DESeq calculations
+
+```{r DESeq calculation}
+dds <- DESeq(dds)
+```
+
+
+## 5.4 Normalized counts 
+
+### Normalized count table
+
+```{r gene annotation}
+norm_anno_list <- generate_norm_anno(dds_object = dds)
+
+norm_anno <- norm_anno_list$norm_anno
+norm_anno[1:3,c(1:2, (ncol(norm_anno)-5):ncol(norm_anno))]
+
+gene_annotation <- norm_anno_list$gene_annotation
+```
+
+### Published DEGs still included?
+```{r}
+table(c(DEGs_publication$CMOP_down[1:6], DEGs_publication$CMOP_up[1:6]) %in%norm_anno$SYMBOL )
+
+c(DEGs_publication$CMOP_down[1:6], 
+  DEGs_publication$CMOP_up[1:6])[c(DEGs_publication$CMOP_down[1:6], DEGs_publication$CMOP_up[1:6]) %in%norm_anno$SYMBOL]
+```
+
+Boxplot of normalized samples
+```{r, fig.height=5, fig.width=8}
+# create a sample table just taking the sample ID and condition for boxplot visualization
+box_sample_table <- sample_table[ ,c("sample_name", "Infection")]
+
+# annotation
+box_norm_table <- norm_anno[ ,colnames(norm_anno) %in% box_sample_table$sample_name]
+box_norm_table$GENEID <- rownames(box_norm_table)
+
+# restructuring the table for ggplot2 analysis w/ melt function 
+box_norm_table <- melt(box_norm_table, id.vars = c("GENEID"))
+colnames(box_norm_table) <- c("GENEID","sample_name","expression")
+box_norm_table <- merge(box_norm_table, box_sample_table, by = "sample_name")
+
+ggplot(box_norm_table, mapping = aes(x=sample_name , y= expression+1,fill=Infection))+
+  geom_boxplot()+
+  scale_y_log10(labels = scales::label_number(big.mark = ","))+
+  # scale_y_continuous() +
+  scale_fill_manual(values = col_infection)+
+  theme_bw() + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))+
+  xlab("Samples") + ylab("Normalized expression") + 
+  ggtitle("Normalized gene expression per sample") 
+```
+
+
+### Mean normalized expression
+For later visualization we also generate a matrix of mean gene expression values per condition
+```{r}
+norm_mean <- mean_function(input = norm_anno, 
+                           anno = sample_table,
+                           condition = "condition")
+```
+
+
+
+## 5.5 Variance stabilizing transformation
+
+```{r varStab}
+dds_vst <- rlog(dds, blind = TRUE)
+```
+
+Plot row standard deviations versus row means
+```{r meanSdPlot, echo=TRUE}
+meanSdPlot(as.matrix(assay(dds_vst)), ranks = FALSE)
+```
+
+
+### Variance stabilized count table
+```{r vst matrix}
+# Data frame of log values
+vst_anno_log <- as.data.frame(assay(dds_vst))
+vst_anno_log$GENEID <- rownames(vst_anno_log)
+vst_anno_log <- merge(vst_anno_log, norm_anno[,c("GENEID","SYMBOL","GENETYPE")], by="GENEID")
+rownames(vst_anno_log) <- vst_anno_log$GENEID
+
+# Data frame of unlog values
+vst_anno <- as.data.frame(assay(dds_vst))
+vst_anno <- 2^vst_anno
+vst_anno$GENEID <- rownames(vst_anno)
+vst_anno <- merge(vst_anno, norm_anno[,c("GENEID","SYMBOL","GENETYPE")], by="GENEID")
+rownames(vst_anno) <- vst_anno$GENEID
+
+vst_anno_log[1:3,c(1:2, (ncol(vst_anno_log)-5):ncol(vst_anno_log))]
+vst_anno[1:3,c(1:2, (ncol(vst_anno)-5):ncol(vst_anno))]
+```
+
+
+### Mean variance stabilized counts
+For later visualization we also generate a matrix of mean vst gene expression values per condition
+```{r}
+vst_mean <- mean_function(input = vst_anno, 
+                           anno = sample_table,
+                           condition = "condition")
+```
+
+
+
+# 6. Exploratory Data Analysis
+
+```{r}
+# choose columns from the sample table for the heatmap annotation
+plot_annotation <- sample_table[ ,c("condition","Infection"), drop = F]
+rownames(plot_annotation) <- sample_table$sample_name
+
+# Mean
+plot_annotation_mean <- as.data.frame(sample_table[, "condition"])
+colnames(plot_annotation_mean) <- "condition"
+plot_annotation_mean <- unique(plot_annotation_mean)
+rownames(plot_annotation_mean) <- plot_annotation_mean$condition
+```
+
+
+
+## 6.1 Frequencies of gene types
+```{r plot genetypes, fig.height=5, fig.width=10}
+TypeCounts <- as.data.frame(table(norm_anno$GENETYPE))
+colnames(TypeCounts) <- c("Type", "Frequency")
+TypeCounts <- subset(TypeCounts, Frequency>0)
+
+ggplot(TypeCounts, aes(x = Type, y = Frequency, label = Frequency))+
+  geom_bar(stat="identity",fill="grey",colour="grey") +
+  theme_bw()+
+  geom_text(size = 3, position = position_stack(vjust = 1))+
+  guides(fill=FALSE)+
+  theme(text = element_text(size=10),axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))+
+  xlab("")
+```
+
+
+## 6.2 Histogram of of means per gene over all samples
+```{r}
+rMeans <- as.data.frame(log(rowMeans(counts(dds, normalized=TRUE)),10))
+colnames(rMeans) <- "rowMeans"
+ggplot(rMeans, aes(x = rowMeans)) + 
+  geom_histogram(bins=100) +
+  xlab("log10(rowMeans)")+
+  scale_x_continuous(breaks=c(0,1,2,3,4,5,6))+
+  theme_bw()
+```
+
+
+
+## 6.3 Boxplots of highest expressed genes
+
+```{r, fig.height=10}
+highestGenes(numGenes = 50)
+```
+
+
+## 6.4 Hierarchical Clustering of all present genes {.tabset .tabset-fade}
+
+```{r, echo=TRUE, fig.height=8, fig.width=7}
+plotHeatmap(input = norm_anno, 
+            plot_annotation = plot_annotation,
+            geneset = "all",
+            title = "Heatmap of all present genes",
+            show_rownames = FALSE,
+            cluster_cols = TRUE)
+```
+
+```{r,echo=FALSE,message=FALSE}
+gc()
+```
+
+## 6.5 Hierarchical Clustering of most variable genes {.tabset .tabset-fade}
+
+```{r, echo=TRUE}
+# define variable genes
+rv = genefilter::rowVars(assay(dds_vst))
+q75 = quantile(rowVars(assay(dds_vst)), .75)
+q75_names = names(which(rv > q75))
+```
+
+```{r, echo=TRUE, message=FALSE, results='hide', fig.height=8, fig.width=7}
+plotHeatmap(input = norm_anno,
+            geneset = q75_names,
+            plot_annotation = plot_annotation,
+            title = "Heatmap of most variable genes",
+            show_rownames = FALSE,
+            cluster_cols = TRUE)
+```
+
+```{r,echo=FALSE,message=FALSE}
+gc()
+```
+
+
+## 6.6 Sample-to-Sample correlation 
+```{r, fig.height=10, fig.width=12}
+corr_function(sampleCor = as.data.frame(assay(dds_vst)), 
+              gene_anno = gene_annotation, 
+              plot_anno = plot_annotation, 
+              title = "Sample correlation based on variance-stabilized counts", 
+              gene_type = "all", 
+              cluster_rows = T, 
+              cluster_cols = T, 
+              mean = F)
+```
+
+
+## 6.7 Principle Component Analysis 
+
+### Percentage of explained variance of PCs
+```{r}
+# Extract the eigenvalues/variances of the principal dimensions
+eigenvalue <- get_eig(prcomp(t(assay(dds_vst))))
+eigenvalue$dim <- as.numeric(c(1:nrow(eigenvalue)))
+
+ggplot(eigenvalue, aes(dim, variance.percent))+ 
+  geom_bar(stat = "identity")+
+  geom_line(aes(dim, variance.percent)) +
+  geom_point(aes(dim, variance.percent)) +
+  geom_line(aes(dim, cumulative.variance.percent), colour= "grey") + 
+  geom_point(aes(dim, cumulative.variance.percent), colour= "grey") + 
+  scale_x_continuous(breaks=c(1:nrow(eigenvalue)))+
+  xlab("Dimensions") +
+  ylab("Percentage of explained variances") +
+  theme_bw()
+```
+
+
+### Plot PCA {.tabset .tabset-fade}
+
+#### Condition
+```{r, fig.width=6, fig.height=6}
+plotPCA(ntop = "all", 
+        xPC = 1, 
+        yPC = 2,
+        color = "condition",
+        anno_colour = col_condition,
+        shape = "NULL",
+        point_size = 3,
+        # label = "ID",
+        title ="PCA based on variance-stabilized counts (all genes)")
+
+plotPCA(ntop = 1000, 
+        xPC = 1, 
+        yPC = 2,
+        color = "condition",
+        anno_colour = col_condition,
+        shape = "NULL",
+        point_size = 3,
+        # label = "ID",
+        title ="PCA based on variance-stabilized counts (top1000)")
+```
+
+
+# 7. Differential Expression Analysis
+
+```{r}
+comparison_table <- data.frame(comparison = c("cMOP_infected"),
+                               control = c("cMOP_control"))
+```
+
+
+## 7.1 Perform Differential Expression Testing
+
+```{r}
+dds_dea <- dds
+DEresults_list <- list()
+  
+for (i in unique(comparison_table$control)) {
+  dds_dea$condition <- relevel(dds_dea$condition, i)
+  dds_dea <- nbinomWaldTest(object = dds_dea)
+  comparison_table_subset  <-  comparison_table[comparison_table$control == i, ]
+  
+  DEresults <- DEAnalysis(input = dds_dea,
+                          comparison_table = comparison_table_subset,
+                          condition = "condition",
+                          alpha = 0.05 ,
+                          lfcThreshold = 0,
+                          sigFC = 1.5,
+                          multiple_testing = "IHW",
+                          shrinkage = TRUE,
+                          shrinkType = "apeglm")
+  DEresults_list <- c(DEresults_list, DEresults)
+}
+
+DEresults <- DEresults_list[unique(names(DEresults_list))]
+```
+
+
+```{r}
+# DEGs_cMOPs_TPM2_nobatch <- 
+#   DEresults$cMOP_infected_vs_cMOP_control@results[DEresults$cMOP_infected_vs_cMOP_control@results$regulation != "n.s.", ]
+
+# DEGs_cMOPs_TPM2_batch <-
+#   DEresults$cMOP_infected_vs_cMOP_control@results[DEresults$cMOP_infected_vs_cMOP_control@results$regulation != "n.s.", ]
+
+# DEGs_cMOPs_count10_nobatch <-
+#   DEresults$cMOP_infected_vs_cMOP_control@results[DEresults$cMOP_infected_vs_cMOP_control@results$regulation != "n.s.", ]
+
+# DEGs_cMOPs_count10_batchcorr <-
+#   DEresults$cMOP_infected_vs_cMOP_control@results[DEresults$cMOP_infected_vs_cMOP_control@results$regulation != "n.s.", ]
+
+# DEGs_cMOPs_count10_samples5_nobatch <-
+#   DEresults$cMOP_infected_vs_cMOP_control@results[DEresults$cMOP_infected_vs_cMOP_control@results$regulation != "n.s.", ]
+
+# DEGs_cMOPs_count10_samples5_batchcorr <-
+#   DEresults$cMOP_infected_vs_cMOP_control@results[DEresults$cMOP_infected_vs_cMOP_control@results$regulation != "n.s.", ]
+```
+
+
+
+### Summary of DE genes
+
+```{r}
+DEcounts <- NULL
+
+for(i in 1:nrow(comparison_table)){
+  tmp <- unlist(DEresults[[1+i]]@Number_DE_genes)
+  DEcounts <- rbind(DEcounts, tmp)
+}
+
+rownames(DEcounts) <- names(DEresults)[-1]
+
+DEcounts
+```
+
+```{r, fig.height=5, fig.width=7}
+library(tidyverse)
+
+tmp <- DEcounts %>% as.data.frame() %>% rownames_to_column("comparison") %>% 
+  pivot_longer(cols = -comparison, names_to = "regulation", values_to = "number")
+
+ggplot(tmp, aes(x=comparison, y = number, fill = regulation)) + 
+  geom_bar(stat = "identity", position="dodge") + 
+  geom_text(aes(label = number), size = 3, position = position_dodge(0.9), vjust = -0.2) +
+  scale_fill_manual(values= c("dodgerblue", "firebrick")) + 
+  theme_bw()
+```
+
+
+
+### 7.2 Hierarchical Clustering of the union of DE genes 
+
+```{r, echo=TRUE, message=FALSE, results='hide', fig.height=6, fig.width=6}
+allDEgenes <- uDEG(comparisons = rownames(DEcounts))
+
+plotHeatmap(input = norm_anno,
+            plot_annotation = plot_annotation,
+            geneset = allDEgenes,
+            title = "Heatmap of all differentially expressed genes",
+            show_rownames = T,
+            cluster_cols = TRUE)
+```
+
+
+### 7.3 Normalized expression of DE genes
+
+```{r, fig.height=4, fig.width=10}
+tmp <- norm_anno[norm_anno$GENEID %in% allDEgenes, ]
+rownames(tmp) <- tmp$SYMBOL
+tmp <- tmp[, grepl(pattern = "cMOP", x = colnames(norm_anno))] %>% rownames_to_column("gene")
+
+df_long <- tmp %>% pivot_longer(!gene, names_to = "ID", values_to = "value")
+df_long
+
+ggplot(df_long, aes(x=gene, y=value)) + 
+  geom_boxplot(outlier.colour = NA) +
+  geom_jitter(aes(color=ID)) + 
+  scale_color_manual(values= c(brewer.pal(name = "Oranges", n = 9)[3:7], brewer.pal(name = "Purples", n = 9)[3:7])) + 
+  ggtitle("Expression level of DEGs") + ylab("Normalized counts") +
+  theme_bw()+ 
+  theme(axis.text.x = element_text(angle=90, vjust=0.5, hjust=1), legend.position = "right") 
+```
+
+
+### 7.4 Overlap with published DEGs
+
+```{r}
+table(DEresults_list$cMOP_infected_vs_cMOP_control@results[DEresults_list$cMOP_infected_vs_cMOP_control@results$regulation != "n.s.",]$SYMBOL %in%
+        c(DEGs_publication$CMOP_down, DEGs_publication$CMOP_up))
+```
+
+```{r, fig.height=4, fig.width=5}
+res <- DEresults_list$cMOP_infected_vs_cMOP_control@results
+genes <-  res[res$regulation != "n.s." & res$SYMBOL %in% c(DEGs_publication$CMOP_down, DEGs_publication$CMOP_up), ]$SYMBOL
+
+tmp <- norm_anno[norm_anno$SYMBOL %in% genes, ]
+rownames(tmp) <- tmp$SYMBOL
+tmp <- tmp[, grepl(pattern = "cMOP", x = colnames(norm_anno))] %>% rownames_to_column("gene")
+
+df_long <- tmp %>% pivot_longer(!gene, names_to = "ID", values_to = "value")
+df_long
+
+ggplot(df_long, aes(x=gene, y=value)) + 
+  geom_boxplot(outlier.colour = NA) +
+  geom_jitter(aes(color=ID)) + 
+  scale_color_manual(values= c(brewer.pal(name = "Oranges", n = 9)[3:7], brewer.pal(name = "Purples", n = 9)[3:7])) + 
+  ggtitle("Expression level of shared DEGs") + ylab("Normalized counts") +
+  theme_bw()+ 
+  theme(axis.text.x = element_text(angle=90, vjust=0.5, hjust=1), legend.position = "right") 
+```
+
